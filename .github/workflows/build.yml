@@ -175,7 +175,7 @@ jobs:
             echo "SeerrMobile $VERSION: the [original Seerr mobile app $UPSTREAM](https://github.com/seerr-team/mobile-app/releases/tag/v$UPSTREAM) with SeerrMobile's changes:"
             echo
             for p in ../patches/*.patch; do
-              echo "- $(sed -n 's/^Subject: //p' "$p" | head -1)"
+              echo "- $(sed -n 's/^Subject: \(\[PATCH[^]]*\] \)\?//p' "$p" | head -1)"
             done
             echo
             echo "Android: SeerrMobile-$VERSION.apk. iPhone and iPad: SeerrMobile-$VERSION.ipa, installed with AltStore, SideStore or Sideloadly."
