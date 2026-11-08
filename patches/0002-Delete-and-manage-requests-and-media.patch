@@ -1,0 +1,824 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <43745159+bornaradusin@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 19:57:55 +0000
+Subject: [PATCH] Delete and manage requests and media
+
+A movie's or series' page gets the Manage panel Seerr's web app has:
+its requests (delete them), remove it from Radarr or Sonarr with its
+files, mark it available, and clear its data. Request cards in the
+request list get approve, decline, edit, retry, delete, cancel and
+remove from Radarr/Sonarr, as on the web.
+---
+ components/ManageSlideOver/index.tsx | 307 +++++++++++++++++++++++++++
+ components/MovieDetails/index.tsx    |  65 ++----
+ components/RequestCard/index.tsx     | 230 +++++++++++++++++++-
+ components/TvDetails/index.tsx       |  60 ++----
+ 4 files changed, 575 insertions(+), 87 deletions(-)
+ create mode 100644 components/ManageSlideOver/index.tsx
+
+diff --git a/components/ManageSlideOver/index.tsx b/components/ManageSlideOver/index.tsx
+new file mode 100644
+index 0000000..172056c
+--- /dev/null
++++ b/components/ManageSlideOver/index.tsx
+@@ -0,0 +1,307 @@
++// SeerrMobile: managing a movie or series, as Seerr's web app does (src/components/ManageSlideOver):
++// its requests (delete them), removing it from Radarr or Sonarr with its files, marking it
++// available, and clearing its data.
++import Badge from '@app/components/Common/Badge';
++import Button from '@app/components/Common/Button';
++import CachedImage from '@app/components/Common/CachedImage';
++import ConfirmButton from '@app/components/Common/ConfirmButton';
++import Modal from '@app/components/Common/Modal';
++import ThemedText from '@app/components/Common/ThemedText';
++import useServerUrl from '@app/hooks/useServerUrl';
++import useSettings from '@app/hooks/useSettings';
++import useToasts from '@app/hooks/useToasts';
++import { Permission, useUser } from '@app/hooks/useUser';
++import getSeerrMessages from '@app/utils/getSeerrMessages';
++import globalMessages from '@app/utils/globalMessages';
++import { MediaRequestStatus, MediaStatus } from '@server/constants/media';
++import { MediaServerType } from '@server/constants/server';
++import type { RadarrSettings, SonarrSettings } from '@server/lib/settings';
++import type { MovieDetails } from '@server/models/Movie';
++import type { TvDetails } from '@server/models/Tv';
++import axios from 'axios';
++import { useState } from 'react';
++import { useIntl } from 'react-intl';
++import { View } from 'react-native';
++import useSWR from 'swr';
++
++const messages = getSeerrMessages('components.ManageSlideOver');
++const requestMessages = getSeerrMessages('components.RequestList.RequestItem');
++
++interface ManageSlideOverProps {
++  show: boolean;
++  mediaType: 'movie' | 'tv';
++  data: MovieDetails | TvDetails;
++  onClose: () => void;
++  revalidate: () => void;
++}
++
++const ManageSlideOver = ({
++  show,
++  mediaType,
++  data,
++  onClose,
++  revalidate,
++}: ManageSlideOverProps) => {
++  const serverUrl = useServerUrl();
++  const intl = useIntl();
++  const settings = useSettings();
++  const { hasPermission } = useUser();
++  const { addToast } = useToasts();
++  const [busy, setBusy] = useState(false);
++  const isAdmin = hasPermission(Permission.ADMIN);
++  const media = data.mediaInfo;
++  const arr = mediaType === 'movie' ? 'Radarr' : 'Sonarr';
++  const kind = intl.formatMessage(
++    mediaType === 'movie' ? messages.movie : messages.tvshow
++  );
++  const enabled4k =
++    mediaType === 'movie'
++      ? settings.currentSettings.movie4kEnabled
++      : settings.currentSettings.series4kEnabled;
++
++  const { data: radarrData } = useSWR<RadarrSettings[]>(
++    show && isAdmin && mediaType === 'movie'
++      ? `${serverUrl}/api/v1/settings/radarr`
++      : null
++  );
++  const { data: sonarrData } = useSWR<SonarrSettings[]>(
++    show && isAdmin && mediaType === 'tv'
++      ? `${serverUrl}/api/v1/settings/sonarr`
++      : null
++  );
++
++  // Removing files goes through the default server only, as on the web
++  const isDefaultService = (is4k: boolean) => {
++    const servers = mediaType === 'movie' ? radarrData : sonarrData;
++    const id = is4k ? media?.serviceId4k : media?.serviceId;
++    return (
++      servers?.some(
++        (s) => s.isDefault && (!is4k || s.is4k) && s.id === id
++      ) ?? false
++    );
++  };
++
++  const requests =
++    media?.requests?.filter(
++      (request) => request.status !== MediaRequestStatus.DECLINED
++    ) ?? [];
++
++  const run = async (action: () => Promise<void>, error: string) => {
++    setBusy(true);
++    try {
++      await action();
++    } catch (e) {
++      if (!axios.isAxiosError(e) || e.response?.status !== 404) {
++        addToast(error, { appearance: 'error', autoDismiss: true });
++      }
++    } finally {
++      setBusy(false);
++      revalidate();
++    }
++  };
++
++  const deleteRequest = (requestId: number) =>
++    run(
++      () => axios.delete(`${serverUrl}/api/v1/request/${requestId}`),
++      intl.formatMessage(requestMessages.failedmodify)
++    );
++
++  const deleteMediaFile = (is4k: boolean) =>
++    run(async () => {
++      await axios.delete(
++        `${serverUrl}/api/v1/media/${media?.id}/file?is4k=${is4k}`
++      );
++      onClose();
++    }, intl.formatMessage(messages.removemediaerror));
++
++  const markAvailable = (is4k: boolean) =>
++    run(
++      () =>
++        axios.post(`${serverUrl}/api/v1/media/${media?.id}/available`, {
++          is4k,
++          ...(mediaType === 'tv' && {
++            seasons: (data as TvDetails).seasons.filter(
++              (season) => season.seasonNumber !== 0
++            ),
++          }),
++        }),
++      intl.formatMessage(messages.removemediaerror)
++    );
++
++  const deleteMedia = () =>
++    run(async () => {
++      await axios.delete(`${serverUrl}/api/v1/media/${media?.id}`);
++      onClose();
++    }, intl.formatMessage(messages.clearmediadataerror));
++
++  const mediaServerName =
++    settings.currentSettings.mediaServerType === MediaServerType.EMBY
++      ? 'Emby'
++      : settings.currentSettings.mediaServerType === MediaServerType.PLEX
++        ? 'Plex'
++        : 'Jellyfin';
++
++  const Heading = ({ children }: { children: React.ReactNode }) => (
++    <ThemedText className="mb-2 mt-4 text-xl font-bold text-white">
++      {children}
++    </ThemedText>
++  );
++
++  const removeButton = (is4k: boolean) =>
++    isAdmin &&
++    (is4k ? media?.serviceUrl4k : media?.serviceUrl) &&
++    isDefaultService(is4k) && (
++      <View className="mt-2">
++        <ConfirmButton
++          onClick={() => deleteMediaFile(is4k)}
++          confirmText={intl.formatMessage(globalMessages.areyousure)}
++          className="w-full"
++        >
++          <ThemedText className="text-white">
++            {intl.formatMessage(is4k ? messages.removearr4k : messages.removearr, {
++              arr,
++            })}
++          </ThemedText>
++        </ConfirmButton>
++        <ThemedText className="mt-1 text-xs text-gray-400">
++          {intl.formatMessage(messages.manageModalRemoveMediaWarning, {
++            mediaType: kind,
++            arr,
++          })}
++        </ThemedText>
++      </View>
++    );
++
++  return (
++    <Modal
++      show={show}
++      title={intl.formatMessage(messages.manageModalTitle, { mediaType: kind })}
++      subTitle={'title' in data ? data.title : data.name}
++      onCancel={onClose}
++      cancelText={intl.formatMessage(globalMessages.close)}
++      loading={busy}
++    >
++      <Heading>{intl.formatMessage(messages.manageModalRequests)}</Heading>
++      {requests.length === 0 ? (
++        <ThemedText className="text-gray-400">
++          {intl.formatMessage(messages.manageModalNoRequests)}
++        </ThemedText>
++      ) : (
++        requests.map((request) => (
++          <View
++            key={`manage-request-${request.id}`}
++            className="mb-2 flex flex-row items-center gap-3 rounded-md border border-gray-700 bg-gray-900/60 p-3"
++          >
++            <CachedImage
++              type="avatar"
++              src={request.requestedBy?.avatar}
++              alt=""
++              style={{ width: 28, height: 28, borderRadius: 14 }}
++            />
++            <View className="flex-1">
++              <ThemedText className="font-semibold text-white">
++                {request.requestedBy?.displayName}
++              </ThemedText>
++              <View className="mt-1 flex flex-row flex-wrap gap-1">
++                {request.is4k && <Badge badgeType="warning">4K</Badge>}
++                <Badge
++                  badgeType={
++                    request.status === MediaRequestStatus.PENDING
++                      ? 'warning'
++                      : request.status === MediaRequestStatus.FAILED
++                        ? 'danger'
++                        : 'success'
++                  }
++                >
++                  {intl.formatMessage(
++                    request.status === MediaRequestStatus.PENDING
++                      ? globalMessages.pending
++                      : request.status === MediaRequestStatus.FAILED
++                        ? globalMessages.failed
++                        : globalMessages.approved
++                  )}
++                </Badge>
++              </View>
++            </View>
++            {hasPermission(Permission.MANAGE_REQUESTS) && (
++              <ConfirmButton
++                onClick={() => deleteRequest(request.id)}
++                confirmText={intl.formatMessage(globalMessages.areyousure)}
++              >
++                <ThemedText className="text-white">
++                  {intl.formatMessage(globalMessages.delete)}
++                </ThemedText>
++              </ConfirmButton>
++            )}
++          </View>
++        ))
++      )}
++
++      {isAdmin && media && (
++        <>
++          <Heading>{intl.formatMessage(messages.manageModalMedia)}</Heading>
++          {media.status !== MediaStatus.AVAILABLE &&
++            media.status !== MediaStatus.BLOCKLISTED && (
++              <Button
++                buttonType="success"
++                className="w-full"
++                onClick={() => markAvailable(false)}
++                disabled={busy}
++              >
++                {intl.formatMessage(
++                  mediaType === 'movie'
++                    ? messages.markavailable
++                    : messages.markallseasonsavailable
++                )}
++              </Button>
++            )}
++          {removeButton(false)}
++
++          {enabled4k && (
++            <>
++              <Heading>{intl.formatMessage(messages.manageModalMedia4k)}</Heading>
++              {media.status4k !== MediaStatus.AVAILABLE && (
++                <Button
++                  buttonType="success"
++                  className="w-full"
++                  onClick={() => markAvailable(true)}
++                  disabled={busy}
++                >
++                  {intl.formatMessage(
++                    mediaType === 'movie'
++                      ? messages.mark4kavailable
++                      : messages.markallseasons4kavailable
++                  )}
++                </Button>
++              )}
++              {removeButton(true)}
++            </>
++          )}
++
++          {media.status !== MediaStatus.BLOCKLISTED && (
++            <>
++              <Heading>{intl.formatMessage(messages.manageModalAdvanced)}</Heading>
++              <ConfirmButton
++                onClick={() => deleteMedia()}
++                confirmText={intl.formatMessage(globalMessages.areyousure)}
++                className="w-full"
++              >
++                <ThemedText className="text-white">
++                  {intl.formatMessage(messages.manageModalClearMedia)}
++                </ThemedText>
++              </ConfirmButton>
++              <ThemedText className="mb-2 mt-2 text-xs text-gray-400">
++                {intl.formatMessage(messages.manageModalClearMediaWarning, {
++                  mediaType: kind,
++                  mediaServerName,
++                })}
++              </ThemedText>
++            </>
++          )}
++        </>
++      )}
++    </Modal>
++  );
++};
++
++export default ManageSlideOver;
+diff --git a/components/MovieDetails/index.tsx b/components/MovieDetails/index.tsx
+index 37ec9f9..19db6ba 100644
+--- a/components/MovieDetails/index.tsx
++++ b/components/MovieDetails/index.tsx
+@@ -14,7 +14,7 @@ import Tag from '@app/components/Common/Tag';
+ import Tooltip from '@app/components/Common/Tooltip';
+ import ExternalLinkBlock from '@app/components/ExternalLinkBlock';
+ // import IssueModal from '@app/components/IssueModal';
+-// import ManageSlideOver from '@app/components/ManageSlideOver';
++import ManageSlideOver from '@app/components/ManageSlideOver';
+ import ErrorPage from '@app/components/ErrorPage';
+ import MediaSlider from '@app/components/MediaSlider';
+ import PersonCard from '@app/components/PersonCard';
+@@ -29,7 +29,7 @@ import { sortCrewPriority } from '@app/utils/creditHelpers';
+ import {
+   // ArrowRightCircle,
+   Cloud,
+-  // Cog,
++  Cog,
+   // ExclamationTriangle,
+   // EyeSlash,
+   Film,
+@@ -77,7 +77,7 @@ const MovieDetails = () => {
+   const topBarHeight = useTopBarHeight();
+   const topBarFadingEdge = useTopBarFadingEdge();
+   const { locale } = useLocale();
+-  // const [showManager, setShowManager] = useState(false);
++  const [showManager, setShowManager] = useState(searchParams.manage === '1');
+   const minStudios = 3;
+   // const [showMoreStudios, setShowMoreStudios] = useState(false);
+   const showMoreStudios = false;
+@@ -459,19 +459,14 @@ const MovieDetails = () => {
+         mediaType="movie"
+         tmdbId={data.id}
+       /> */}
+-      {/* <ManageSlideOver
++      {/* SeerrMobile: managing it, as on the web (its requests, removing, clearing) */}
++      <ManageSlideOver
+         data={data}
+         mediaType="movie"
+-        onClose={() => {
+-          setShowManager(false);
+-          router.replace({
+-            pathname: router.pathname,
+-            query: { movieId: searchParams.movieId },
+-          });
+-        }}
+-        revalidate={() => revalidate()}
+         show={showManager}
+-      /> */}
++        onClose={() => setShowManager(false)}
++        revalidate={() => revalidate()}
++      />
+       {/* <BlocklistModal
+         tmdbId={data.id}
+         type="movie"
+@@ -639,38 +634,18 @@ const MovieDetails = () => {
+                 </Button>
+               </Tooltip>
+             )} */}
+-          {/* {hasPermission(Permission.MANAGE_REQUESTS) &&
+-            data.mediaInfo &&
+-            (data.mediaInfo.jellyfinMediaId ||
+-              data.mediaInfo.jellyfinMediaId4k ||
+-              data.mediaInfo.status !== MediaStatus.UNKNOWN ||
+-              data.mediaInfo.status4k !== MediaStatus.UNKNOWN) && (
+-              <Tooltip content={intl.formatMessage(messages.managemovie)}>
+-                <Button
+-                  buttonType="ghost"
+-                  onClick={() => setShowManager(true)}
+-                  className="relative ml-2 first:ml-0"
+-                >
+-                  <Cog className="!mr-0" />
+-                  {hasPermission(
+-                    [Permission.MANAGE_ISSUES, Permission.VIEW_ISSUES],
+-                    {
+-                      type: 'or',
+-                    }
+-                  ) &&
+-                    (
+-                      data.mediaInfo?.issues.filter(
+-                        (issue) => issue.status === IssueStatus.OPEN
+-                      ) ?? []
+-                    ).length > 0 && (
+-                      <>
+-                        <View className="absolute -right-1 -top-1 h-3 w-3 rounded-full bg-red-600" />
+-                        <View className="absolute -right-1 -top-1 h-3 w-3 animate-ping rounded-full bg-red-600" />
+-                      </>
+-                    )}
+-                </Button>
+-              </Tooltip>
+-            )} */}
++          {hasPermission(Permission.MANAGE_REQUESTS) && data.mediaInfo && (
++            <Button
++              buttonType="ghost"
++              className="z-40 ml-2 flex flex-row items-center"
++              onClick={() => setShowManager(true)}
++              pressableProps={{
++                accessibilityLabel: intl.formatMessage(messages.managemovie),
++              }}
++            >
++              <Cog color="#ffffff" />
++            </Button>
++          )}
+         </View>
+       </View>
+       <View className="media-overview px-4">
+diff --git a/components/RequestCard/index.tsx b/components/RequestCard/index.tsx
+index 364afd3..cecffdb 100644
+--- a/components/RequestCard/index.tsx
++++ b/components/RequestCard/index.tsx
+@@ -1,11 +1,14 @@
+ import Badge from '@app/components/Common/Badge';
++import Button from '@app/components/Common/Button';
+ import CachedImage from '@app/components/Common/CachedImage';
++import ConfirmButton from '@app/components/Common/ConfirmButton';
+ import FormattedRelativeTime from '@app/components/Common/FormattedRelativeTime';
+ import ThemedText from '@app/components/Common/ThemedText';
+ import RequestModal from '@app/components/RequestModal';
+ import StatusBadge from '@app/components/StatusBadge';
+ import useDeepLinks from '@app/hooks/useDeepLinks';
+ import useServerUrl from '@app/hooks/useServerUrl';
++import useToasts from '@app/hooks/useToasts';
+ import { Permission, useUser } from '@app/hooks/useUser';
+ import getSeerrMessages from '@app/utils/getSeerrMessages';
+ import globalMessages from '@app/utils/globalMessages';
+@@ -18,12 +21,13 @@ import type { MediaRequest } from '@server/entity/MediaRequest';
+ import type { NonFunctionProperties } from '@server/interfaces/api/common';
+ import type { MovieDetails } from '@server/models/Movie';
+ import type { TvDetails } from '@server/models/Tv';
++import axios from 'axios';
+ import { LinearGradient } from 'expo-linear-gradient';
+ import { Link } from 'expo-router';
+ import { useEffect, useState } from 'react';
+ import { useIntl } from 'react-intl';
+ import { Platform, Pressable, View } from 'react-native';
+-import useSWR from 'swr';
++import useSWR, { useSWRConfig } from 'swr';
+ 
+ const messages = getSeerrMessages('components.RequestCard');
+ const messagesRequestList = getSeerrMessages(
+@@ -171,8 +175,16 @@ interface RequestCardProps {
+ const RequestCard = ({ request, onTitleData, canExpand }: RequestCardProps) => {
+   const serverUrl = useServerUrl();
+   const intl = useIntl();
+-  const { hasPermission } = useUser();
++  const { user, hasPermission } = useUser();
+   const [showEditModal, setShowEditModal] = useState(false);
++  // SeerrMobile: the request's own actions, as on Seerr's web app (RequestList/RequestItem)
++  const { addToast } = useToasts();
++  const { mutate } = useSWRConfig();
++  const [updatingType, setUpdatingType] = useState<
++    'approve' | 'decline' | null
++  >(null);
++  const [isRetrying, setRetrying] = useState(false);
++  const [isDeleted, setDeleted] = useState(false);
+   const url =
+     request.type === 'movie'
+       ? `/api/v1/movie/${request.media.tmdbId}`
+@@ -212,6 +224,81 @@ const RequestCard = ({ request, onTitleData, canExpand }: RequestCardProps) => {
+     }
+   }, [title, onTitleData, request]);
+ 
++  // The request lists and counts, fetched again after a change
++  const refreshLists = () =>
++    mutate(
++      (key) => typeof key === 'string' && key.includes('/api/v1/request'),
++      undefined,
++      { revalidate: true }
++    );
++
++  const modifyRequest = async (type: 'approve' | 'decline') => {
++    setUpdatingType(type);
++    try {
++      await axios.post(`${serverUrl}/api/v1/request/${request.id}/${type}`);
++      revalidate();
++      refreshLists();
++    } catch {
++      addToast(intl.formatMessage(messagesRequestList.failedmodify), {
++        autoDismiss: true,
++        appearance: 'error',
++      });
++    } finally {
++      setUpdatingType(null);
++    }
++  };
++
++  const deleteRequest = async () => {
++    try {
++      await axios.delete(`${serverUrl}/api/v1/request/${request.id}`);
++      setDeleted(true);
++      refreshLists();
++    } catch {
++      addToast(intl.formatMessage(messagesRequestList.failedmodify), {
++        autoDismiss: true,
++        appearance: 'error',
++      });
++    }
++  };
++
++  const deleteMediaFile = async () => {
++    try {
++      await axios.delete(
++        `${serverUrl}/api/v1/media/${request.media.id}/file?is4k=${request.is4k}`
++      );
++    } catch (e) {
++      if (!axios.isAxiosError(e) || e.response?.status !== 404) {
++        addToast(intl.formatMessage(messagesRequestList.removemediaerror), {
++          autoDismiss: true,
++          appearance: 'error',
++        });
++      }
++    }
++    revalidate();
++    refreshLists();
++  };
++
++  const retryRequest = async () => {
++    setRetrying(true);
++    try {
++      const result = await axios.post<NonFunctionProperties<MediaRequest>>(
++        `${serverUrl}/api/v1/request/${request.id}/retry`
++      );
++      revalidate(result.data);
++    } catch {
++      addToast(intl.formatMessage(messagesRequestList.failedretry), {
++        autoDismiss: true,
++        appearance: 'error',
++      });
++    } finally {
++      setRetrying(false);
++    }
++  };
++
++  if (isDeleted) {
++    return null;
++  }
++
+   if (!title && !error) {
+     return <RequestCardPlaceholder canExpend={canExpand} />;
+   }
+@@ -495,10 +582,149 @@ const RequestCard = ({ request, onTitleData, canExpand }: RequestCardProps) => {
+           )}
+         </Pressable>
+       </Link>
++      {canExpand && !Platform.isTV && (
++        <RequestActions
++          canManage={hasPermission(Permission.MANAGE_REQUESTS)}
++          isOwn={requestData.requestedBy?.id === user?.id}
++          canEditOwn={
++            requestData.type === 'tv' ||
++            hasPermission(Permission.REQUEST_ADVANCED)
++          }
++          status={requestData.status}
++          canRemove={
++            (request as { canRemove?: boolean }).canRemove === true
++          }
++          arr={request.type === 'movie' ? 'Radarr' : 'Sonarr'}
++          updatingType={updatingType}
++          isRetrying={isRetrying}
++          onApprove={() => modifyRequest('approve')}
++          onDecline={() => modifyRequest('decline')}
++          onEdit={() => setShowEditModal(true)}
++          onRetry={retryRequest}
++          onDelete={deleteRequest}
++          onRemoveMedia={deleteMediaFile}
++        />
++      )}
+     </>
+   );
+ };
+ 
++interface RequestActionsProps {
++  canManage: boolean;
++  isOwn: boolean;
++  canEditOwn: boolean;
++  status: MediaRequestStatus;
++  canRemove: boolean;
++  arr: string;
++  updatingType: 'approve' | 'decline' | null;
++  isRetrying: boolean;
++  onApprove: () => void;
++  onDecline: () => void;
++  onEdit: () => void;
++  onRetry: () => void;
++  onDelete: () => void;
++  onRemoveMedia: () => void;
++}
++
++/** SeerrMobile: approve, decline, edit, retry, delete or cancel a request, as on the web. */
++const RequestActions = ({
++  canManage,
++  isOwn,
++  canEditOwn,
++  status,
++  canRemove,
++  arr,
++  updatingType,
++  isRetrying,
++  onApprove,
++  onDecline,
++  onEdit,
++  onRetry,
++  onDelete,
++  onRemoveMedia,
++}: RequestActionsProps) => {
++  const intl = useIntl();
++  const pending = status === MediaRequestStatus.PENDING;
++  const showRetry = status === MediaRequestStatus.FAILED && canManage;
++  const showDelete = !pending && canManage;
++  const showDecide = pending && canManage;
++  const showEdit = pending && (canManage || (isOwn && canEditOwn));
++  const showCancel = pending && !canManage && isOwn;
++
++  if (!showRetry && !showDelete && !showDecide && !showEdit && !showCancel) {
++    return null;
++  }
++
++  return (
++    <View className="mt-2 flex flex-row flex-wrap gap-2">
++      {showRetry && (
++        <Button buttonType="primary" onClick={onRetry} disabled={isRetrying}>
++          {intl.formatMessage(
++            isRetrying ? globalMessages.retrying : globalMessages.retry
++          )}
++        </Button>
++      )}
++      {showDecide && (
++        <>
++          <Button
++            buttonType="success"
++            onClick={onApprove}
++            disabled={updatingType !== null}
++          >
++            {intl.formatMessage(globalMessages.approve)}
++          </Button>
++          <Button
++            buttonType="danger"
++            onClick={onDecline}
++            disabled={updatingType !== null}
++          >
++            {intl.formatMessage(globalMessages.decline)}
++          </Button>
++        </>
++      )}
++      {showEdit && (
++        <Button
++          buttonType="ghost"
++          onClick={onEdit}
++          disabled={updatingType !== null}
++        >
++          {intl.formatMessage(messagesRequestList.editrequest)}
++        </Button>
++      )}
++      {showDelete && (
++        <ConfirmButton
++          onClick={onDelete}
++          confirmText={intl.formatMessage(globalMessages.areyousure)}
++        >
++          <ThemedText className="text-white">
++            {intl.formatMessage(messagesRequestList.deleterequest)}
++          </ThemedText>
++        </ConfirmButton>
++      )}
++      {showDelete && canRemove && (
++        <ConfirmButton
++          onClick={onRemoveMedia}
++          confirmText={intl.formatMessage(globalMessages.areyousure)}
++        >
++          <ThemedText className="text-white">
++            {intl.formatMessage(messagesRequestList.removearr, { arr })}
++          </ThemedText>
++        </ConfirmButton>
++      )}
++      {showCancel && (
++        <ConfirmButton
++          onClick={onDelete}
++          confirmText={intl.formatMessage(globalMessages.areyousure)}
++        >
++          <ThemedText className="text-white">
++            {intl.formatMessage(messagesRequestList.cancelRequest)}
++          </ThemedText>
++        </ConfirmButton>
++      )}
++    </View>
++  );
++};
++
+ export { RequestCardPlaceholder as Placeholder };
+ 
+ export default RequestCard;
+diff --git a/components/TvDetails/index.tsx b/components/TvDetails/index.tsx
+index 7766266..564184d 100644
+--- a/components/TvDetails/index.tsx
++++ b/components/TvDetails/index.tsx
+@@ -14,7 +14,7 @@ import Tag from '@app/components/Common/Tag';
+ import Tooltip from '@app/components/Common/Tooltip';
+ import ExternalLinkBlock from '@app/components/ExternalLinkBlock';
+ // import IssueModal from '@app/components/IssueModal';
+-// import ManageSlideOver from '@app/components/ManageSlideOver';
++import ManageSlideOver from '@app/components/ManageSlideOver';
+ import ErrorPage from '@app/components/ErrorPage';
+ import MediaSlider from '@app/components/MediaSlider';
+ import PersonCard from '@app/components/PersonCard';
+@@ -34,7 +34,7 @@ import globalMessages from '@app/utils/globalMessages';
+ import {
+   Film,
+   // ArrowRightCircle,
+-  // Cog,
++  Cog,
+   // ExclamationTriangle,
+   MinusCircle,
+   Play,
+@@ -86,7 +86,7 @@ const TvDetails = () => {
+   const topBarFadingEdge = useTopBarFadingEdge();
+   const { locale } = useLocale();
+   const [showRequestModal, setShowRequestModal] = useState(false);
+-  // const [showManager, setShowManager] = useState(false);
++  const [showManager, setShowManager] = useState(searchParams.manage === '1');
+   // const [showIssueModal, setShowIssueModal] = useState(false);
+   const [isUpdating, setIsUpdating] = useState<boolean>(false);
+   const [toggleWatchlist, setToggleWatchlist] = useState<boolean>(true);
+@@ -465,19 +465,14 @@ const TvDetails = () => {
+         }}
+         onCancel={() => setShowRequestModal(false)}
+       />
+-      {/* <ManageSlideOver
++      {/* SeerrMobile: managing it, as on the web (its requests, removing, clearing) */}
++      <ManageSlideOver
+         data={data}
+         mediaType="tv"
+-        onClose={() => {
+-          setShowManager(false);
+-          router.replace({
+-            pathname: router.pathname,
+-            query: { tvId: router.query.tvId },
+-          });
+-        }}
+-        revalidate={() => revalidate()}
+         show={showManager}
+-      /> */}
++        onClose={() => setShowManager(false)}
++        revalidate={() => revalidate()}
++      />
+       <View className="mt-4 flex flex-col items-center px-4 pt-2 xl:flex-row xl:items-end">
+         <View className="overflow-hidden rounded shadow md:rounded-lg md:shadow-2xl xl:mr-4">
+           <CachedImage
+@@ -632,33 +627,18 @@ const TvDetails = () => {
+                 </Button>
+               </Tooltip>
+             )} */}
+-          {/* {hasPermission(Permission.MANAGE_REQUESTS) && data.mediaInfo && (
+-            <Tooltip content={intl.formatMessage(messages.manageseries)}>
+-              <Button
+-                buttonType="ghost"
+-                onClick={() => setShowManager(true)}
+-                className="relative ml-2 first:ml-0"
+-              >
+-                <Cog className="!mr-0" />
+-                {hasPermission(
+-                  [Permission.MANAGE_ISSUES, Permission.VIEW_ISSUES],
+-                  {
+-                    type: 'or',
+-                  }
+-                ) &&
+-                  (
+-                    data.mediaInfo?.issues.filter(
+-                      (issue) => issue.status === IssueStatus.OPEN
+-                    ) ?? []
+-                  ).length > 0 && (
+-                    <>
+-                      <div className="absolute -right-1 -top-1 h-3 w-3 rounded-full bg-red-600" />
+-                      <div className="absolute -right-1 -top-1 h-3 w-3 animate-ping rounded-full bg-red-600" />
+-                    </>
+-                  )}
+-              </Button>
+-            </Tooltip>
+-          )} */}
++          {hasPermission(Permission.MANAGE_REQUESTS) && data.mediaInfo && (
++            <Button
++              buttonType="ghost"
++              className="z-40 ml-2 flex flex-row items-center"
++              onClick={() => setShowManager(true)}
++              pressableProps={{
++                accessibilityLabel: intl.formatMessage(messages.manageseries),
++              }}
++            >
++              <Cog color="#ffffff" />
++            </Button>
++          )}
+         </View>
+       </View>
+       <View className="media-overview px-4">

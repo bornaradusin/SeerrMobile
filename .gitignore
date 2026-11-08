@@ -1,0 +1,6 @@
+# What tools/apply.sh puts together
+app/
+node_modules/
+*.apk
+*.ipa
+*.jks
