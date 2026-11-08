@@ -1,0 +1,544 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <43745159+bornaradusin@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 19:57:55 +0000
+Subject: [PATCH] Updates from GitHub
+
+About once a day, and from the menu (Check for updates), the app looks
+for a newer SeerrMobile release. On Android it downloads the APK and
+opens Android's installer; the APK is deleted once the new version
+starts. On an iPhone the new version opens in AltStore or SideStore,
+or the release page.
+---
+ app/_layout.tsx                          |   6 +
+ components/Layout/UserDropdown/index.tsx |  21 +-
+ components/UpdateDialog/index.tsx        | 130 ++++++++++
+ utils/updater.ts                         | 308 +++++++++++++++++++++++
+ 4 files changed, 464 insertions(+), 1 deletion(-)
+ create mode 100644 components/UpdateDialog/index.tsx
+ create mode 100644 utils/updater.ts
+
+diff --git a/app/_layout.tsx b/app/_layout.tsx
+index 2613603..8d6058d 100644
+--- a/app/_layout.tsx
++++ b/app/_layout.tsx
+@@ -1,4 +1,6 @@
+ import BottomNavigation from '@app/components/Layout/BottomNavigation';
++import UpdateDialog from '@app/components/UpdateDialog';
++import { checkNowAndThen } from '@app/utils/updater';
+ import UserDropdown from '@app/components/Layout/UserDropdown';
+ import SearchInput from '@app/components/SearchInput';
+ import ToastContainer from '@app/components/ToastContainer';
+@@ -157,6 +159,8 @@ function RootLayout() {
+   useEffect(() => {
+     if (loaded) {
+       SplashScreen.hide();
++      // SeerrMobile: about once a day, a look for a newer version on GitHub
++      void checkNowAndThen();
+     }
+   }, [loaded]);
+ 
+@@ -210,6 +214,8 @@ function RootLayout() {
+         </TVFocusGuideView>
+       )}
+       {user && <BottomNavigation />}
++      {/* SeerrMobile: updates from GitHub */}
++      <UpdateDialog />
+     </View>
+   );
+ 
+diff --git a/components/Layout/UserDropdown/index.tsx b/components/Layout/UserDropdown/index.tsx
+index d7be737..811b7ea 100644
+--- a/components/Layout/UserDropdown/index.tsx
++++ b/components/Layout/UserDropdown/index.tsx
+@@ -3,7 +3,11 @@ import ThemedText from '@app/components/Common/ThemedText';
+ import useServerUrl from '@app/hooks/useServerUrl';
+ import { useUser } from '@app/hooks/useUser';
+ import getSeerrMessages from '@app/utils/getSeerrMessages';
+-import { ArrowRightOnRectangle, Clock } from '@nandorojo/heroicons/24/outline';
++import {
++  ArrowDownTray,
++  ArrowRightOnRectangle,
++  Clock,
++} from '@nandorojo/heroicons/24/outline';
+ import { Cog, User } from '@nandorojo/heroicons/24/solid';
+ import axios from 'axios';
+ import { BlurView } from 'expo-blur';
+@@ -19,6 +23,7 @@ import {
+   type ViewInstance,
+ } from 'react-native';
+ import { mutate } from 'swr';
++import { checkForUpdate, updatable } from '@app/utils/updater';
+ 
+ const messages = getSeerrMessages('components.Layout.UserDropdown');
+ 
+@@ -158,6 +163,20 @@ const UserDropdown = ({ blurTarget }: UserDropdownProps) => {
+                   </View>
+                 </Pressable>
+               </Link>
++              {/* SeerrMobile: updates from GitHub */}
++              {updatable && (
++                <Pressable
++                  onPress={() => {
++                    setIsOpen(false);
++                    void checkForUpdate(true);
++                  }}
++                >
++                  <View className="flex flex-row items-center gap-2 px-4 py-2">
++                    <ArrowDownTray width={20} height={20} color="#e5e7eb" />
++                    <ThemedText>Check for updates</ThemedText>
++                  </View>
++                </Pressable>
++              )}
+               <Pressable
+                 onPress={() => {
+                   setIsOpen(false);
+diff --git a/components/UpdateDialog/index.tsx b/components/UpdateDialog/index.tsx
+new file mode 100644
+index 0000000..abd3da4
+--- /dev/null
++++ b/components/UpdateDialog/index.tsx
+@@ -0,0 +1,130 @@
++// SeerrMobile: a newer SeerrMobile from GitHub, with what's new, and the way to install it on
++// this phone (utils/updater.ts).
++import LoadingSpinner from '@app/components/Common/LoadingSpinner';
++import Modal from '@app/components/Common/Modal';
++import ThemedText from '@app/components/Common/ThemedText';
++import {
++  checkForUpdate,
++  closeUpdates,
++  currentVersion,
++  installOnAndroid,
++  installWith,
++  later,
++  openReleasePage,
++  useUpdates,
++} from '@app/utils/updater';
++import { Platform, ScrollView, View } from 'react-native';
++
++const UpdateDialog = () => {
++  const updates = useUpdates();
++  const { step, update, stores } = updates;
++  if (!updates.open) return null;
++
++  const ready = step === 'ready' && update;
++  const title =
++    step === 'checking'
++      ? 'Looking for updates…'
++      : step === 'latest'
++        ? 'SeerrMobile is up to date'
++        : update
++          ? `SeerrMobile ${update.version} is ready`
++          : 'Updates';
++
++  // The buttons: what this phone can do with the update
++  let okText: string | undefined;
++  let onOk: (() => void) | undefined;
++  let secondaryText: string | undefined;
++  let onSecondary: (() => void) | undefined;
++  let cancelText = 'OK';
++  let onCancel: (() => void) | undefined = closeUpdates;
++  if (ready && Platform.OS === 'android') {
++    okText = 'Update';
++    onOk = () => void installOnAndroid();
++    cancelText = 'Not now';
++    onCancel = () => void later();
++  } else if (ready) {
++    const [first, second] = stores;
++    okText = first ? `Update with ${first}` : 'Get the .ipa';
++    onOk = () => void (first ? installWith(first) : openReleasePage());
++    if (second) {
++      secondaryText = `Update with ${second}`;
++      onSecondary = () => void installWith(second);
++    }
++    cancelText = 'Not now';
++    onCancel = () => void later();
++  } else if (step === 'failed') {
++    okText = 'Try again';
++    onOk = () =>
++      void (update && Platform.OS === 'android'
++        ? installOnAndroid()
++        : checkForUpdate(true));
++    cancelText = 'Close';
++  } else if (step === 'downloading') {
++    onCancel = undefined;
++  }
++
++  return (
++    <Modal
++      show
++      title={title}
++      onOk={onOk}
++      okText={okText}
++      onSecondary={onSecondary}
++      secondaryText={secondaryText}
++      onCancel={onCancel}
++      cancelText={cancelText}
++    >
++      {step === 'checking' && (
++        <View className="items-center py-4">
++          <LoadingSpinner />
++        </View>
++      )}
++      {step === 'latest' && (
++        <ThemedText className="text-gray-300">
++          You have the newest version, {currentVersion}.
++        </ThemedText>
++      )}
++      {step === 'downloading' && (
++        <View className="py-2">
++          <ThemedText className="text-gray-200">
++            Downloading… {Math.round(updates.progress * 100)}%
++          </ThemedText>
++          <View className="mt-2 h-2 overflow-hidden rounded-full bg-gray-700">
++            <View
++              className="h-2 rounded-full bg-indigo-500"
++              style={{ width: `${Math.round(updates.progress * 100)}%` }}
++            />
++          </View>
++          <ThemedText className="mt-2 text-xs text-gray-400">
++            Android’s installer opens when it’s done. The download is deleted
++            once the update is in.
++          </ThemedText>
++        </View>
++      )}
++      {step === 'failed' && (
++        <ThemedText className="text-red-400">{updates.problem}</ThemedText>
++      )}
++      {ready && (
++        <View>
++          <ThemedText className="text-xs text-gray-400">
++            You have {currentVersion}.
++          </ThemedText>
++          {update.notes !== '' && (
++            <ScrollView style={{ maxHeight: 280 }} className="mt-2">
++              <ThemedText className="text-gray-200">{update.notes}</ThemedText>
++            </ScrollView>
++          )}
++          {Platform.OS === 'ios' && (
++            <ThemedText className="mt-3 text-xs text-gray-400">
++              {stores.length
++                ? `An app from outside the App Store can’t replace itself: ${stores.join(' or ')} installs the new version over this one, and your settings stay.`
++                : 'Download the .ipa and install it the way you installed SeerrMobile (Sideloadly, say). It goes over this one, and your settings stay.'}
++            </ThemedText>
++          )}
++        </View>
++      )}
++    </Modal>
++  );
++};
++
++export default UpdateDialog;
+diff --git a/utils/updater.ts b/utils/updater.ts
+new file mode 100644
+index 0000000..a003b59
+--- /dev/null
++++ b/utils/updater.ts
+@@ -0,0 +1,308 @@
++// SeerrMobile: updates from GitHub (bornaradusin/SeerrMobile releases). About once a day, and
++// from the menu, the app looks for a newer release.
++// - Android: the APK is downloaded into the app's cache and handed to Android's installer. It's
++//   deleted once the new version starts.
++// - iPhone: an app installed outside the App Store can't replace itself, so the new .ipa opens
++//   in AltStore or SideStore (whichever is on the phone), or the release page opens.
++import AsyncStorage from '@react-native-async-storage/async-storage';
++import Constants from 'expo-constants';
++import * as FileSystem from 'expo-file-system/legacy';
++import * as IntentLauncher from 'expo-intent-launcher';
++import { useSyncExternalStore } from 'react';
++import { Linking, Platform } from 'react-native';
++
++const LATEST =
++  'https://api.github.com/repos/bornaradusin/SeerrMobile/releases/latest';
++const EVERY = 20 * 3600 * 1000;
++const LAST = 'seerrmobile-update-last-check';
++const LATER = 'seerrmobile-update-later';
++const FOLDER = `${FileSystem.cacheDirectory ?? ''}updates/`;
++
++export interface Asset {
++  name: string;
++  url: string;
++  size: number;
++}
++
++export interface AppUpdate {
++  version: string;
++  notes: string;
++  page: string;
++  apk?: Asset;
++  ipa?: Asset;
++}
++
++export type UpdateStep =
++  | 'idle'
++  | 'checking'
++  | 'latest'
++  | 'ready'
++  | 'downloading'
++  | 'failed';
++
++export type Store = 'AltStore' | 'SideStore';
++
++interface UpdateState {
++  step: UpdateStep;
++  update: AppUpdate | null;
++  progress: number;
++  problem: string;
++  /** The update dialog is open. */
++  open: boolean;
++  /** On an iPhone: which sideloading apps can install it. */
++  stores: Store[];
++}
++
++let state: UpdateState = {
++  step: 'idle',
++  update: null,
++  progress: 0,
++  problem: '',
++  open: false,
++  stores: [],
++};
++const listeners = new Set<() => void>();
++
++function set(patch: Partial<UpdateState>) {
++  state = { ...state, ...patch };
++  listeners.forEach((listener) => listener());
++}
++
++export function useUpdates(): UpdateState {
++  return useSyncExternalStore(
++    (listener) => {
++      listeners.add(listener);
++      return () => listeners.delete(listener);
++    },
++    () => state
++  );
++}
++
++/** This app's full version (the original's plus SeerrMobile's number, e.g. 0.11.2.1). */
++export const currentVersion: string =
++  (Constants.expoConfig?.extra?.seerrMobileVersion as string | undefined) ??
++  Constants.expoConfig?.version ??
++  '0';
++
++export const updatable = Platform.OS === 'android' || Platform.OS === 'ios';
++
++/** Whether version a is newer than b ("0.11.10.1" is newer than "0.11.9.3"). */
++export function isNewer(a: string, b: string): boolean {
++  const parts = (v: string) => v.split(/[.+-]/).map((p) => parseInt(p, 10) || 0);
++  const x = parts(a);
++  const y = parts(b);
++  for (let i = 0; i < Math.max(x.length, y.length); i++) {
++    const d = (x[i] ?? 0) - (y[i] ?? 0);
++    if (d) return d > 0;
++  }
++  return false;
++}
++
++/** Release notes as plain text: no Markdown headings or code fences, bullets as dots. */
++function readableNotes(markdown: string): string {
++  return markdown
++    .replace(/\r/g, '')
++    .split('\n')
++    .filter((line) => !line.trim().startsWith('```'))
++    .map((line) => {
++      const t = line.trimEnd();
++      const body = t.trimStart();
++      if (body.startsWith('#')) return body.replace(/^#+\s*/, '');
++      if (body.startsWith('- ') || body.startsWith('* ')) {
++        return `${' '.repeat(t.length - body.length)}• ${body.slice(2)}`;
++      }
++      return t;
++    })
++    .join('\n')
++    .replace(/\*\*(.+?)\*\*/g, '$1')
++    .replace(/`([^`]+)`/g, '$1')
++    .replace(/\n{3,}/g, '\n\n')
++    .trim();
++}
++
++interface Release {
++  tag_name: string;
++  body?: string | null;
++  html_url: string;
++  draft?: boolean;
++  prerelease?: boolean;
++  assets?: { name: string; browser_download_url: string; size?: number }[];
++}
++
++async function latest(): Promise<AppUpdate | null> {
++  const res = await fetch(LATEST, {
++    headers: { Accept: 'application/vnd.github+json' },
++  });
++  if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
++  const release = (await res.json()) as Release;
++  if (release.draft || release.prerelease) return null;
++  const version = release.tag_name.trim().replace(/^v/, '');
++  if (!isNewer(version, currentVersion)) return null;
++  const asset = (test: (name: string) => boolean): Asset | undefined => {
++    const a = (release.assets ?? []).find((x) => test(x.name));
++    return a
++      ? { name: a.name, url: a.browser_download_url, size: a.size ?? 0 }
++      : undefined;
++  };
++  const update: AppUpdate = {
++    version,
++    notes: readableNotes(release.body ?? ''),
++    page: release.html_url,
++    apk: asset((n) => n.endsWith('.apk')),
++    ipa: asset((n) => n.endsWith('.ipa')),
++  };
++  // only an update this phone can install
++  if (Platform.OS === 'android' && !update.apk) return null;
++  if (Platform.OS === 'ios' && !update.ipa) return null;
++  return update;
++}
++
++async function findStores(): Promise<Store[]> {
++  if (Platform.OS !== 'ios') return [];
++  const found: Store[] = [];
++  for (const [store, scheme] of [
++    ['AltStore', 'altstore://'],
++    ['SideStore', 'sidestore://'],
++  ] as const) {
++    if (await Linking.canOpenURL(scheme).catch(() => false)) found.push(store);
++  }
++  return found;
++}
++
++/** Looks on GitHub. [manual]: asked for in the menu, so the dialog shows what was found, even nothing. */
++export async function checkForUpdate(manual = false): Promise<void> {
++  if (!updatable) return;
++  if (manual) set({ open: true });
++  if (state.step === 'checking' || state.step === 'downloading') return;
++  set({ step: 'checking', problem: '' });
++  try {
++    const found = await latest();
++    await AsyncStorage.setItem(LAST, String(Date.now()));
++    if (!found) {
++      set({ step: 'latest', update: null });
++      return;
++    }
++    const stores = await findStores();
++    const later = await AsyncStorage.getItem(LATER);
++    set({
++      step: 'ready',
++      update: found,
++      stores,
++      open: state.open || (!manual && found.version !== later),
++    });
++  } catch {
++    set({
++      step: manual ? 'failed' : 'idle',
++      update: null,
++      problem: 'Couldn’t reach GitHub. Check the connection and try again.',
++    });
++  }
++}
++
++/** When the app opens: deletes an installed update's APK, then looks about once a day. */
++export async function checkNowAndThen(): Promise<void> {
++  if (!updatable) return;
++  await cleanLeftovers().catch(() => undefined);
++  const last = Number((await AsyncStorage.getItem(LAST)) ?? 0);
++  if (Date.now() - last > EVERY) await checkForUpdate(false);
++}
++
++/** "Not now": this version isn't offered again by itself; the menu still has it. */
++export async function later(): Promise<void> {
++  if (state.update) await AsyncStorage.setItem(LATER, state.update.version);
++  set({ open: false });
++}
++
++export function closeUpdates(): void {
++  if (state.step === 'downloading') return;
++  set({
++    open: false,
++    step:
++      state.step === 'latest' || (state.step === 'failed' && !state.update)
++        ? 'idle'
++        : state.step,
++  });
++}
++
++/** Android: downloads the APK, checks its size and opens Android's installer. */
++export async function installOnAndroid(): Promise<void> {
++  const apk = state.update?.apk;
++  if (Platform.OS !== 'android' || !apk || state.step === 'downloading') return;
++  set({ step: 'downloading', progress: 0, problem: '' });
++  try {
++    await FileSystem.deleteAsync(FOLDER, { idempotent: true });
++    await FileSystem.makeDirectoryAsync(FOLDER, { intermediates: true });
++    const target = FOLDER + apk.name.replace(/[^\w.()-]+/g, '_');
++    const task = FileSystem.createDownloadResumable(apk.url, target, {}, (p) =>
++      set({
++        progress:
++          p.totalBytesExpectedToWrite > 0
++            ? p.totalBytesWritten / p.totalBytesExpectedToWrite
++            : 0,
++      })
++    );
++    const result = await task.downloadAsync();
++    if (!result || result.status < 200 || result.status >= 300) {
++      throw new Error('download');
++    }
++    const info = await FileSystem.getInfoAsync(target);
++    if (!info.exists || (apk.size > 0 && info.size !== apk.size)) {
++      await FileSystem.deleteAsync(target, { idempotent: true });
++      throw new Error('damaged');
++    }
++    const uri = await FileSystem.getContentUriAsync(target);
++    // still offered, in case the installer is closed without updating
++    set({ step: 'ready', open: false });
++    await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
++      data: uri,
++      type: 'application/vnd.android.package-archive',
++      // FLAG_GRANT_READ_URI_PERMISSION
++      flags: 1,
++    });
++  } catch (e) {
++    set({
++      step: 'failed',
++      open: true,
++      problem:
++        (e as Error)?.message === 'damaged'
++          ? 'The download was damaged. Try again.'
++          : 'The download didn’t finish. Try again.',
++    });
++  }
++}
++
++/** iPhone: hands the new .ipa to AltStore or SideStore, which install it over this one. */
++export async function installWith(store: Store): Promise<void> {
++  const ipa = state.update?.ipa;
++  if (!ipa) return;
++  const scheme = store === 'AltStore' ? 'altstore' : 'sidestore';
++  await Linking.openURL(
++    `${scheme}://install?url=${encodeURIComponent(ipa.url)}`
++  ).catch(() => undefined);
++  set({ open: false });
++}
++
++/** The release page, to download the update by hand. */
++export async function openReleasePage(): Promise<void> {
++  if (state.update) await Linking.openURL(state.update.page).catch(() => undefined);
++  set({ open: false });
++}
++
++/**
++ * Deletes downloaded APKs of this version or older (already installed) and any left from an
++ * install given up a day ago.
++ */
++async function cleanLeftovers(): Promise<void> {
++  if (Platform.OS !== 'android') return;
++  const folder = await FileSystem.getInfoAsync(FOLDER);
++  if (!folder.exists) return;
++  const dayAgo = Date.now() / 1000 - 24 * 3600;
++  for (const name of await FileSystem.readDirectoryAsync(FOLDER)) {
++    const info = await FileSystem.getInfoAsync(FOLDER + name);
++    const version = name.match(/\d+(\.\d+)+/)?.[0];
++    const old = info.exists && info.modificationTime < dayAgo;
++    if (!version || !isNewer(version, currentVersion) || old) {
++      await FileSystem.deleteAsync(FOLDER + name, { idempotent: true });
++    }
++  }
++}

@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <43745159+bornaradusin@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 19:57:55 +0000
+Subject: [PATCH] SeerrMobile: own name, app ID, version and Android signing
+
+app.config.js puts SeerrMobile's name, app ID and version over the
+original app.json, which stays untouched. The Android release build is
+signed with SeerrMobile's key when the build has one.
+---
+ app.config.js                   | 57 +++++++++++++++++++++++++++++++++
+ plugins/withSeerrMobileBuild.js | 43 +++++++++++++++++++++++++
+ 2 files changed, 100 insertions(+)
+ create mode 100644 app.config.js
+ create mode 100644 plugins/withSeerrMobileBuild.js
+
+diff --git a/app.config.js b/app.config.js
+new file mode 100644
+index 0000000..8371984
+--- /dev/null
++++ b/app.config.js
+@@ -0,0 +1,57 @@
++// SeerrMobile: its own name, app ID and version on top of the original app.json, which stays
++// untouched so the original's changes come through. Also Android release signing and what the
++// updater needs (utils/updater.ts).
++
++// The full version, set by the build: the original's version plus SeerrMobile's own number
++// (0.11.2.1 is the first SeerrMobile build of the original's 0.11.2)
++const fullVersion = process.env.SEERRMOBILE_VERSION;
++
++module.exports = ({ config }) => {
++  const upstream = config.version;
++  const version = fullVersion || `${upstream}.0`;
++  const [major, minor, patch, revision] = version
++    .split('.')
++    .map((n) => parseInt(n, 10) || 0);
++  // 0.11.2.1 → 110201: always higher than the build before
++  const versionCode = major * 1000000 + minor * 10000 + patch * 100 + revision;
++
++  const plugins = (config.plugins ?? []).filter(
++    // registers the original's package with Google Play, not this one
++    (plugin) => (Array.isArray(plugin) ? plugin[0] : plugin) !== 'expo-adi-registration'
++  );
++
++  return {
++    ...config,
++    name: 'SeerrMobile',
++    slug: 'seerrmobile',
++    owner: undefined,
++    scheme: 'seerrmobile',
++    githubUrl: 'https://github.com/bornaradusin/SeerrMobile',
++    ios: {
++      ...config.ios,
++      bundleIdentifier: 'io.github.bornaradusin.seerrmobile',
++      buildNumber: String(versionCode),
++      infoPlist: {
++        ...config.ios?.infoPlist,
++        // to see whether AltStore or SideStore can install an update
++        LSApplicationQueriesSchemes: ['altstore', 'sidestore'],
++      },
++    },
++    android: {
++      ...config.android,
++      package: 'io.github.bornaradusin.seerrmobile',
++      versionCode,
++      permissions: [
++        ...(config.android?.permissions ?? []),
++        // updates from GitHub, installed from inside the app
++        'android.permission.REQUEST_INSTALL_PACKAGES',
++      ],
++    },
++    plugins: [...plugins, './plugins/withSeerrMobileBuild'],
++    extra: {
++      ...config.extra,
++      eas: undefined,
++      seerrMobileVersion: version,
++    },
++  };
++};
+diff --git a/plugins/withSeerrMobileBuild.js b/plugins/withSeerrMobileBuild.js
+new file mode 100644
+index 0000000..87f7219
+--- /dev/null
++++ b/plugins/withSeerrMobileBuild.js
+@@ -0,0 +1,43 @@
++// SeerrMobile's Android build: signed with its own key when the build has one (the
++// SEERRMOBILE_KEYSTORE variables), and the full version (0.11.2.1) as the version name.
++const { withAppBuildGradle } = require('@expo/config-plugins');
++
++module.exports = function withSeerrMobileBuild(config) {
++  return withAppBuildGradle(config, (mod) => {
++    if (mod.modResults.language !== 'groovy') {
++      throw new Error('withSeerrMobileBuild: app/build.gradle is no longer Groovy; update this plugin');
++    }
++    let gradle = mod.modResults.contents;
++    const version = mod.extra?.seerrMobileVersion ?? config.extra?.seerrMobileVersion;
++
++    if (!gradle.includes('SEERRMOBILE_KEYSTORE')) {
++      gradle = gradle.replace(
++        /signingConfigs\s*\{/,
++        `signingConfigs {
++        release {
++            if (System.getenv("SEERRMOBILE_KEYSTORE")) {
++                storeFile file(System.getenv("SEERRMOBILE_KEYSTORE"))
++                storePassword System.getenv("SEERRMOBILE_KEYSTORE_PASSWORD")
++                keyAlias System.getenv("SEERRMOBILE_KEY_ALIAS")
++                keyPassword System.getenv("SEERRMOBILE_KEY_PASSWORD")
++            }
++        }`
++      );
++      const types = gradle.indexOf('buildTypes');
++      const release = gradle.indexOf('release {', types);
++      const signing = gradle.indexOf('signingConfig signingConfigs.debug', release);
++      if (types < 0 || release < 0 || signing < 0) {
++        throw new Error('withSeerrMobileBuild: the release build type is laid out differently; update this plugin');
++      }
++      gradle =
++        gradle.slice(0, signing) +
++        'signingConfig System.getenv("SEERRMOBILE_KEYSTORE") ? signingConfigs.release : signingConfigs.debug' +
++        gradle.slice(signing + 'signingConfig signingConfigs.debug'.length);
++    }
++    if (version) {
++      gradle = gradle.replace(/versionName\s+"[^"]*"/, `versionName "${version}"`);
++    }
++    mod.modResults.contents = gradle;
++    return mod;
++  });
++};

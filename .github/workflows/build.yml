@@ -1,0 +1,192 @@
+# Builds and releases SeerrMobile: the original Seerr mobile app (seerr-team/mobile-app) at its
+# newest release, with SeerrMobile's patches (patches/) applied, as an Android APK and an iPhone
+# IPA (not signed: installed with AltStore, SideStore or Sideloadly).
+#
+# - Every day: when the original has a new release, it's built with the patches and released.
+# - A push that changes the patches or the build: released again, with the next number.
+# - By hand: Actions → Build → Run workflow.
+#
+# Versions are the original's plus SeerrMobile's own number: 0.11.2.1 is the first SeerrMobile
+# release of the original's 0.11.2, 0.11.2.2 the next. If a patch no longer fits a new release of
+# the original, the build fails (GitHub emails about it) until the patch is updated.
+#
+# Repository secrets for the Android signing key (so each APK installs over the last):
+#   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+name: Build
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'patches/**'
+      - 'tools/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      upstream: ${{ steps.plan.outputs.upstream }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: What to build
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          UPSTREAM=$(git ls-remote --tags --refs https://github.com/seerr-team/mobile-app 'v*' \
+            | sed 's|.*refs/tags/v||' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          echo "The original's newest release: $UPSTREAM"
+          # SeerrMobile's releases of it so far
+          LAST=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName -q '.[].tagName' \
+            | grep -E "^v${UPSTREAM//./\\.}\.[0-9]+$" | sed "s/^v${UPSTREAM}\.//" | sort -n | tail -1 || true)
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && [ -n "$LAST" ]; then
+            echo "Already released as $UPSTREAM.$LAST: nothing new from the original."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION="$UPSTREAM.$(( ${LAST:-0} + 1 ))"
+          echo "Building SeerrMobile $VERSION"
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  android:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: The original app with SeerrMobile's patches
+        run: tools/apply.sh "v${{ needs.plan.outputs.upstream }}" app
+      - name: Signing key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "::error::The ANDROID_KEYSTORE_BASE64 secret isn't set: an APK signed with a throwaway key can't update the app."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/seerrmobile.jks"
+          echo "SEERRMOBILE_KEYSTORE=$RUNNER_TEMP/seerrmobile.jks" >> "$GITHUB_ENV"
+      - name: Build the APK
+        working-directory: app
+        env:
+          CI: 1
+          EXPO_TV: 1
+          SEERRMOBILE_VERSION: ${{ env.VERSION }}
+          SEERRMOBILE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SEERRMOBILE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          SEERRMOBILE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          npx expo prebuild --platform android --clean --no-install
+          cd android
+          chmod +x gradlew
+          # Phones, tablets and TV boxes are ARM
+          ./gradlew --no-daemon assembleRelease -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/SeerrMobile-$VERSION.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SeerrMobile-apk
+          path: SeerrMobile-*.apk
+
+  ios:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: macos-26
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: The original app with SeerrMobile's patches
+        run: tools/apply.sh "v${{ needs.plan.outputs.upstream }}" app
+      - name: Build the IPA
+        working-directory: app
+        env:
+          CI: 1
+          EXPO_TV: 0
+          SEERRMOBILE_VERSION: ${{ env.VERSION }}
+        run: |
+          set -o pipefail
+          xcodebuild -version
+          npx expo prebuild --platform ios --clean
+          WORKSPACE=$(ls -d ios/*.xcworkspace | head -1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/ios" -quiet \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+          APP=$(ls -d "$RUNNER_TEMP/ios/Build/Products/Release-iphoneos/"*.app | head -1)
+          # An .ipa is the app in a Payload folder, zipped
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$GITHUB_WORKSPACE/SeerrMobile-$VERSION.ipa" Payload)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SeerrMobile-ipa
+          path: SeerrMobile-*.ipa
+
+  release:
+    # Released once the APK is built; the IPA goes with it when its build worked too
+    needs: [plan, android, ios]
+    if: always() && needs.plan.outputs.build == 'true' && needs.android.result == 'success'
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      UPSTREAM: ${{ needs.plan.outputs.upstream }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: apps
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IOS_RESULT: ${{ needs.ios.result }}
+        run: |
+          cd apps
+          sha256sum SeerrMobile-* | tee SHA256SUMS.txt
+          {
+            echo "SeerrMobile $VERSION: the [original Seerr mobile app $UPSTREAM](https://github.com/seerr-team/mobile-app/releases/tag/v$UPSTREAM) with SeerrMobile's changes:"
+            echo
+            for p in ../patches/*.patch; do
+              echo "- $(sed -n 's/^Subject: //p' "$p" | head -1)"
+            done
+            echo
+            echo "Android: SeerrMobile-$VERSION.apk. iPhone and iPad: SeerrMobile-$VERSION.ipa, installed with AltStore, SideStore or Sideloadly."
+            if [ "$IOS_RESULT" != "success" ]; then
+              echo
+              echo "The iPhone build didn't work this time, so there's no .ipa in this release."
+            fi
+          } > ../notes.md
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            gh release upload "v$VERSION" SeerrMobile-* SHA256SUMS.txt --clobber
+          else
+            gh release create "v$VERSION" SeerrMobile-* SHA256SUMS.txt --target "$GITHUB_SHA" \
+              --title "SeerrMobile $VERSION" --notes-file ../notes.md --latest
+          fi
